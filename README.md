@@ -2,8 +2,13 @@ Simple RISC-V Vector example
 ============================
 
 This is an example of writing the same vector processing function in C
-and in assembly language for RISC-V Vector extension v1.0, and comparing
-the results.
+and in assembly language for the RISC-V Vector extension, and comparing
+the results. There are two assembly versions of `vec_len_rvv`:
+
+* `vec.S` — ratified RVV 1.0 (+ Zba), e.g. Banana Pi F3
+* `vec_0p7.S` — RVV 0.7.1 draft (T-Head XTheadVector), e.g. Lichee Pi 4A
+
+Both export the same `vec_len_rvv` symbol and signature, so `main.c` is shared.
 
 By default the generated program is run in qemu, but another emulator such
 as Spike could also be used, or run on real RVV-capable hardware if you have
@@ -46,21 +51,60 @@ By default you will get libraries for rv64gc only. If you want a good set of lib
 can experiment with rv32i, rv64i or other reduced configurations then add "--enable-multilib"
 to the ./configure.
 
-### Compiling and running the example
+### Building for a board
 
-Just type "make"
+The two vector ISAs are encoded differently, so the binaries are **not
+cross-compatible**: an RVV 1.0 binary will not run correctly on the C910, and an
+RVV 0.7.1 binary will not run on RVV 1.0 hardware. Build on (or for) the board you
+will run on. Both targets write `./main`.
 
-Expected output:
+| Target          | Board                          | Vector ISA                | Source      | `-march`                |
+|-----------------|--------------------------------|---------------------------|-------------|-------------------------|
+| `make bananapi` | Banana Pi F3 (SpacemiT K1)     | RVV 1.0, VLEN=256, + Zba  | `vec.S`     | `rv64gcv_zba`           |
+| `make licheepi` | Lichee Pi 4A (T-Head TH1520)   | RVV 0.7.1 draft (C910)    | `vec_0p7.S` | `rv64gc_xtheadvector`   |
+
+The compiler defaults to `riscv64-linux-gnu-gcc`; override the prefix with
+`CROSS`, e.g. `make licheepi CROSS=riscv64-unknown-linux-gnu-`.
+
+`make clean` removes `./main`.
+
+#### `make licheepi` toolchain requirements
+
+`-march=rv64gc_xtheadvector` needs GCC 14+ with a matching binutils (2.42+).
+Older distro toolchains (e.g. Ubuntu 22.04's GCC 11 / binutils 2.38) reject it.
+Upstream binutils spells the 0.7.1 instructions with a `th.` prefix
+(`th.vsetvli`, `th.vlseg3e.v`, `th.vse.v`, ...); `vec_0p7.S` adds the prefix
+automatically when `__riscv_xtheadvector` is defined.
+
+If your toolchain lacks XTheadVector, the alternative is T-Head's toolchain fork
+(Xuantie GNU toolchain) with `-march=rv64gcv0p7`, which uses the unprefixed 0.7.1
+mnemonics:
+
+    riscv64-unknown-linux-gnu-gcc -O main.c vec_0p7.S -o main -march=rv64gcv0p7 -lm
+
+Notable differences from `vec.S`: no `ta,ma` policy flags on `vsetvli`, SEW-sized
+`vlseg3e.v`/`vse.v` instead of `vlseg3e32.v`/`vse32.v`, and no Zba on the C910
+(`sh1add`/`sh2add` become `slli` + `add`).
+
+### Running under QEMU
+
+    make go
+
+builds the RVV 1.0 (`bananapi`) binary and runs it in QEMU with `vlen=128`.
+This needs a QEMU recent enough to support RVV 1.0 and the
+`rvv_ta_all_1s`/`rvv_ma_all_1s` options (Ubuntu 22.04's QEMU 6.2 is too old). Upstream QEMU does not emulate
+the RVV 0.7.1 draft. Point `QEMU` at a different binary if needed, e.g.
+`make go QEMU="/path/to/qemu-riscv64 -L /usr/riscv64-linux-gnu"` for a
+glibc-linked build.
+
+Expected output (timings will vary):
 
     $ make
-    riscv64-unknown-elf-gcc -O main.c vec.S -o main -march=rv64gcv_zba -lm
-    qemu-riscv64 -cpu rv64,v=true,zba=true,vlen=128 ./main
-    3.741657 3.741657
-    8.774964 8.774964
-    13.928389 13.928389
-    19.104973 19.104973
-    24.289915 24.289915
-    29.478806 29.478806
+    riscv64-linux-gnu-gcc -O main.c vec.S -o main -march=rv64gcv_zba -lm
+    qemu-riscv64 -cpu rv64,v=true,zba=true,vlen=128,rvv_ta_all_1s=on,rvv_ma_all_1s=on ./main
+    now: 2026-11-13 18:06:53
+    time taken for C implementation: 0.013043
+    time taken for vector implementation: 0.007188
 
 You can trace the qemu execution by adding "-singlestep -d nochain,cpu" to the qemu command line.
-Cross-reference instruction addresses with the output from "riscv64-unknown-elf-objdump -d main".
+Cross-reference instruction addresses with the output from "riscv64-linux-gnu-objdump -d main".
