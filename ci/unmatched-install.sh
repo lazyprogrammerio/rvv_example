@@ -7,7 +7,8 @@ PREFIX=${PREFIX:-/usr/local}
 HERE=$(cd "$(dirname "$0")" && pwd)
 
 [ "$(uname -m)" = riscv64 ] || { echo "error: this package is for riscv64 (got $(uname -m))" >&2; exit 1; }
-[ "$(id -u)" -eq 0 ] || [ -w "$PREFIX" ] || { echo "error: run as root: sudo $0" >&2; exit 1; }
+# Root is needed for ldconfig and /etc/ld.so.conf.d, even for a writable PREFIX.
+[ "$(id -u)" -eq 0 ] || { echo "error: run as root: sudo $0" >&2; exit 1; }
 
 echo "Installing llama.cpp tools to $PREFIX/bin"
 install -d "$PREFIX/bin" "$PREFIX/lib"
@@ -28,6 +29,11 @@ else
   install -m 0644 "$HERE/lib/vulkan-fallback/libvulkan.so.1" "$PREFIX/lib/libvulkan.so.1"
 fi
 
+# The binaries carry no RPATH; make sure ld.so searches $PREFIX/lib.
+case "$PREFIX" in
+  /usr/local|/usr) ;;
+  *) echo "$PREFIX/lib" > /etc/ld.so.conf.d/llamacpp-riscv64-unmatched.conf ;;
+esac
 ldconfig
 
 if ldd "$PREFIX/bin/llama-cli" | grep 'not found'; then
