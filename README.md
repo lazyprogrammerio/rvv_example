@@ -156,3 +156,78 @@ so `vec.S` is expected to beat the scalar loop. On the C910 (VLEN=128, 4 floats)
 the margin is less certain, since segmented loads are slow on some
 implementations. Neither has been measured here. To get real numbers, run
 `./main` on the board, ideally repeating each version several times.
+
+### llama.cpp on HiFive Unmatched + RX 580
+
+`.github/workflows/cross-build.yml` cross-builds [llama.cpp](https://github.com/ggml-org/llama.cpp)
+with the Vulkan backend for the SiFive HiFive Unmatched (riscv64, Ubuntu 26.04)
+with an AMD RX 580 driven by `amdgpu` + Mesa RADV. Everything is built on an
+x86-64 runner; nothing is compiled on the board. This is separate from the
+RVV benchmark above (the U74 cores have no vector unit) and does not touch
+the `make` targets.
+
+What the build does (`ci/build-llamacpp.sh`, toolchain in `ci/riscv64-linux-gnu.cmake`):
+
+* Cross-builds Khronos Vulkan-Headers, SPIRV-Headers and a headless
+  Vulkan-Loader (`libvulkan.so.1`) into a staging prefix, and points
+  llama.cpp's `Vulkan_INCLUDE_DIR`/`Vulkan_LIBRARY` at it so no host x86-64
+  Vulkan libraries are used.
+* Builds llama.cpp (pinned tag) with `GGML_VULKAN=ON`, `GGML_NATIVE=OFF`,
+  `GGML_STATIC=ON`, CPU code for `-march=rv64gc` (no RVV), and compiles the
+  Vulkan shaders with the host's `glslc`.
+* Checks with `file` and `riscv64-linux-gnu-readelf -d` that every binary is
+  riscv64 and only needs `libc`, `libm` and `libvulkan.so.1`.
+* Produces `dist/llamacpp-riscv64-unmatched.tar.gz` with `llama-cli`,
+  `llama-server`, `llama-quantize`, `llama-bench`, a fallback `libvulkan.so.1`
+  and `install.sh`.
+
+The binaries are not fully static. The Vulkan loader must be a shared library
+because it `dlopen()`s Mesa's RADV driver. ggml and llama are linked statically
+into each tool, along with libstdc++ and libgcc.
+
+To rebuild locally on an x86-64 Ubuntu 24.04+ host: `ci/build-llamacpp.sh`
+(override `LLAMACPP_REF`, `VULKAN_REF`, `WORK_DIR`, `DIST_DIR` as needed).
+
+#### Install on the board
+
+1. Download the tarball: either the `llamacpp-riscv64-unmatched` artifact from
+   a [cross-build-llamacpp](https://github.com/lazyprogrammerio/rvv_example/actions/workflows/cross-build.yml) run, or the
+   asset of a GitHub Release (pushing a `v*` tag publishes one).
+2. Install:
+
+       tar -xzf llamacpp-riscv64-unmatched.tar.gz
+       cd llamacpp-riscv64-unmatched
+       sudo ./install.sh
+
+   This copies the tools to `/usr/local/bin` and runs `ldconfig`. The bundled
+   `libvulkan.so.1` is installed to `/usr/local/lib` only if the system has no
+   Vulkan loader (normally Mesa's `libvulkan1` provides it).
+3. Check that RADV sees the card (`vulkaninfo` is in `vulkan-tools`):
+
+       vulkaninfo --summary
+
+   The device list should show the RX 580 as a `RADV POLARIS...` device
+   with `driverID = DRIVER_ID_MESA_RADV`. If only `llvmpipe` appears, the
+   amdgpu/RADV setup is not working, and llama.cpp will not use the GPU.
+4. Run with all layers offloaded to the GPU:
+
+       llama-cli -m model.gguf -ngl 99
+
+   At startup llama.cpp should log `ggml_vulkan: Found 1 Vulkan devices`
+   followed by the RX 580.
+
+Caveats:
+
+* **PCIe Gen2 x8.** The Unmatched's PCIe slot runs at Gen2 x8, about 4 GB/s,
+  while the RX 580 supports Gen3 x16. Loading the model and offloading layers is slow, and
+  any layers left on the CPU make every token cross the bus. Use a model
+  that fits in the card's 4/8 GB of VRAM and keep `-ngl 99`.
+* **U74 CPU.** Four in-order 1.2 GHz cores with no vector extension. Tokenizing,
+  sampling and any layers not offloaded run here, so CPU-only inference is
+  very slow. Set `-t 4`.
+* CI cannot test the GPU. The smoke-test job only runs `llama-cli --version`
+  under `qemu-riscv64`, so GPU inference has to be checked on the board.
+* The runner's `glslc` may not support some newer shader extensions
+  (cooperative matrix, bfloat16, integer dot product). Those shader
+  variants are skipped at build time. Polaris does not support the
+  cooperative-matrix paths anyway.

@@ -1,0 +1,105 @@
+name: cross-build-llamacpp
+
+# Cross-builds llama.cpp (Vulkan backend) for the HiFive Unmatched
+# (riscv64, SiFive U74, Ubuntu + amdgpu/Mesa RADV) on an x86-64 runner.
+# Nothing is built on the board; see ci/build-llamacpp.sh and README.md.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ARTIFACT: llamacpp-riscv64-unmatched
+
+jobs:
+  build:
+    name: cross-build (riscv64, Vulkan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cross-build llama.cpp + Vulkan loader
+        run: ci/build-llamacpp.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: dist/${{ env.ARTIFACT }}.tar.gz
+          if-no-files-found: error
+
+  # Proves the riscv64 binaries load and execute under user-mode emulation.
+  # GPU inference cannot be tested here: there is no AMD GPU (or any Vulkan
+  # ICD) on the runner, so Vulkan finds no devices. RADV/RX 580 must be
+  # checked on the board (vulkaninfo --summary, then llama-cli -ngl 99).
+  smoke-test:
+    name: smoke test (qemu-riscv64)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT }}
+
+      - name: Install qemu-user-static, binfmt-support and riscv64 runtime libs
+        run: |
+          sudo apt-get update
+          # Ubuntu 26.04 made qemu-user-static a virtual package provided by qemu-user-binfmt.
+          qemu=qemu-user-static
+          apt-cache policy "$qemu" | grep -q 'Candidate: [0-9]' || qemu=qemu-user-binfmt
+          sudo apt-get install -y "$qemu" binfmt-support \
+            libc6-riscv64-cross libstdc++6-riscv64-cross libgcc-s1-riscv64-cross
+
+      - name: llama-cli --version under qemu-riscv64
+        env:
+          # Where qemu finds the riscv64 dynamic linker and libc.
+          QEMU_LD_PREFIX: /usr/riscv64-linux-gnu
+        run: |
+          tar -xzf "$ARTIFACT.tar.gz"
+          cd "$ARTIFACT"
+          file bin/llama-cli
+          # The board normally provides libvulkan.so.1; here use the bundled fallback.
+          export LD_LIBRARY_PATH="$PWD/lib:$PWD/lib/vulkan-fallback"
+          # Executed directly: binfmt_misc hands the riscv64 ELF to qemu-riscv64.
+          ./bin/llama-cli --version
+          ./bin/llama-server --version
+          # --help exit codes differ between tools; just check they ran and printed usage.
+          for tool in llama-quantize llama-bench; do
+            ./bin/$tool --help > "$RUNNER_TEMP/$tool.txt" 2>&1 || true
+            grep -qi usage "$RUNNER_TEMP/$tool.txt" || { cat "$RUNNER_TEMP/$tool.txt"; exit 1; }
+            echo "$tool: OK"
+          done
+
+  release:
+    name: publish release asset
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build, smoke-test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT }}
+
+      - name: Upload tarball to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "$TAG" --notes "llama.cpp (Vulkan) for HiFive Unmatched, cross-built for riscv64."
+          gh release upload "$TAG" "$ARTIFACT.tar.gz" --clobber
