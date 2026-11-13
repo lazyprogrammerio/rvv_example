@@ -173,7 +173,7 @@ What the build does (`ci/build-llamacpp.sh`, toolchain in `ci/riscv64-linux-gnu.
   llama.cpp's `Vulkan_INCLUDE_DIR`/`Vulkan_LIBRARY` at it so no host x86-64
   Vulkan libraries are used.
 * Builds llama.cpp (pinned tag) with `GGML_VULKAN=ON`, `GGML_NATIVE=OFF`,
-  `GGML_STATIC=ON`, CPU code for `-march=rv64gc_zba` (no RVV), and compiles the
+  `GGML_STATIC=ON`, CPU code for `-march=rv64gc` (no RVV), and compiles the
   Vulkan shaders with the host's `glslc`.
 * Checks with `file` and `riscv64-linux-gnu-readelf -d` that every binary is
   riscv64 and only needs `libc`, `libm` and `libvulkan.so.1`.

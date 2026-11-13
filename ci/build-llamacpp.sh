@@ -110,8 +110,9 @@ build_llamacpp() {
   # into each tool; with static libstdc++/libgcc and ggml's own thread pool
   # (no libgomp) the binaries only need libc, libm and libvulkan.so.1. No
   # RPATH is embedded so the build tree's staging path cannot leak.
-  # The U74 is RV64GC + Zba/Zbb with no vector or half-float extensions, so
-  # the CPU backend is built for -march=rv64gc_zba (ggml defaults to RVV).
+  # The Unmatched's FU740 U74 cores are plain RV64GC (no vector, half-float
+  # or bitmanip extensions), so the CPU backend is built for -march=rv64gc
+  # (ggml defaults to RVV).
   # Vulkan_* point FindVulkan at the cross-built loader/headers explicitly, so
   # the host's x86-64 libvulkan/headers can never be picked up.
   cmake -S "$SRC_DIR/llama.cpp" -B "$WORK_DIR/build/llama.cpp" -G Ninja \
@@ -127,7 +128,7 @@ build_llamacpp() {
     -DCMAKE_SKIP_RPATH=ON \
     -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
     -DGGML_RVV=OFF -DGGML_RV_ZFH=OFF -DGGML_RV_ZVFH=OFF \
-    -DGGML_RV_ZICBOP=OFF -DGGML_RV_ZIHINTPAUSE=OFF -DGGML_RV_ZBA=ON \
+    -DGGML_RV_ZICBOP=OFF -DGGML_RV_ZIHINTPAUSE=OFF -DGGML_RV_ZBA=OFF \
     -DVulkan_INCLUDE_DIR="$RISCV64_STAGING_PREFIX/include" \
     -DVulkan_LIBRARY="$RISCV64_STAGING_PREFIX/lib/libvulkan.so" \
     -DVulkan_GLSLC_EXECUTABLE="$glslc" \
@@ -195,7 +196,7 @@ package() {
   cat >"$PKG_DIR/BUILD-INFO" <<INFO
 llama.cpp      $LLAMACPP_REF ($(git -C "$SRC_DIR/llama.cpp" rev-parse --short HEAD))
 Vulkan-Loader  $VULKAN_REF
-target         riscv64 Linux glibc, -march=rv64gc_zba (SiFive U74, HiFive Unmatched)
+target         riscv64 Linux glibc, -march=rv64gc (SiFive U74, HiFive Unmatched)
 backends       CPU + Vulkan
 compiler       $(riscv64-linux-gnu-gcc --version | head -1)
 glslc          $(glslc --version 2>&1 | head -1)
