@@ -68,10 +68,19 @@ The compiler defaults to `riscv64-linux-gnu-gcc`; override the prefix with
 
 `make clean` removes `./main`.
 
+### CI
+
+`.github/workflows/build.yml` has one job per board. Each job builds with the
+make target above and runs `ci/check.c` (which compares `vec_len_rvv` with a
+scalar reference) under QEMU. `bananapi` uses Ubuntu's QEMU at vlen=128 and
+vlen=256. `licheepi` uses T-Head's XuanTie QEMU fork (`-cpu c910v`).
+
 #### `make licheepi` toolchain requirements
 
 `-march=rv64gc_xtheadvector` needs GCC 14+ with a matching binutils (2.42+).
 Older distro toolchains (e.g. Ubuntu 22.04's GCC 11 / binutils 2.38) reject it.
+On Ubuntu 24.04, install `gcc-14-riscv64-linux-gnu` and run
+`make licheepi CC_RV=riscv64-linux-gnu-gcc-14`.
 Upstream binutils spells the 0.7.1 instructions with a `th.` prefix
 (`th.vsetvli`, `th.vlseg3e.v`, `th.vse.v`, ...); `vec_0p7.S` adds the prefix
 automatically when `__riscv_xtheadvector` is defined.
