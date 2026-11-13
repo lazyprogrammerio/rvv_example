@@ -117,3 +117,42 @@ Expected output (timings will vary):
 
 You can trace the qemu execution by adding "-singlestep -d nochain,cpu" to the qemu command line.
 Cross-reference instruction addresses with the output from "riscv64-linux-gnu-objdump -d main".
+
+### Performance under QEMU
+
+QEMU checks correctness, not speed. Its timings do not predict how fast the
+code runs on the boards, and under emulation the vector version is often the
+slower one. The C-vs-vector ranking can flip with the compiler and QEMU build,
+even when the vector code is unchanged.
+
+These are the best of 10 runs over 100,000 points, measured on an x86-64 host
+with QEMU linux-user:
+
+| Emulator                             | Compiler for the C side | C       | Vector  |
+|--------------------------------------|-------------------------|---------|---------|
+| Ubuntu QEMU 8.2, vlen=256            | GCC 11                  | 5.8 ms  | 3.0 ms  |
+| Ubuntu QEMU 8.2, vlen=256            | GCC 16                  | 2.0 ms  | 3.0 ms  |
+| XuanTie QEMU, vlen=256               | GCC 11                  | 12.5 ms | 4.7 ms  |
+| XuanTie QEMU, vlen=256               | GCC 16                  | 2.2 ms  | 4.7 ms  |
+| XuanTie QEMU, `c910v` (`vec_0p7.S`)  | GCC 16                  | 2.2 ms  | 5.4 ms  |
+
+Why this happens:
+
+* QEMU runs each vector instruction through a software helper that loops over
+  the elements one at a time. Segmented loads such as `vlseg3` are especially
+  costly. Scalar float instructions are translated into much faster host code.
+  So under emulation, vector code often loses even where it would win on
+  hardware.
+* The C side depends on the compiler. GCC 11 surrounds each `sqrtf` with
+  `frflags`/`fsflags` for its errno check, and QEMU emulates those slowly.
+  GCC 13+ does not emit them, so its scalar loop runs about 5x faster under
+  QEMU. CI uses Ubuntu 24.04's GCC 13/14, which is why the vector version looks
+  slower there.
+* First-touch page faults on the output arrays add only a little, and in
+  `main.c` both versions pay that cost.
+
+On the boards, VLEN=256 on the Banana Pi F3 processes 8 floats per instruction,
+so `vec.S` is expected to beat the scalar loop. On the C910 (VLEN=128, 4 floats)
+the margin is less certain, since segmented loads are slow on some
+implementations. Neither has been measured here. To get real numbers, run
+`./main` on the board, ideally repeating each version several times.
