@@ -56,7 +56,10 @@ jobs:
       - name: Install qemu-user-static, binfmt-support and riscv64 runtime libs
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-user-static binfmt-support \
+          # Ubuntu 26.04 made qemu-user-static a virtual package provided by qemu-user-binfmt.
+          qemu=qemu-user-static
+          apt-cache policy "$qemu" | grep -q 'Candidate: [0-9]' || qemu=qemu-user-binfmt
+          sudo apt-get install -y "$qemu" binfmt-support \
             libc6-riscv64-cross libstdc++6-riscv64-cross libgcc-s1-riscv64-cross
 
       - name: llama-cli --version under qemu-riscv64
@@ -69,7 +72,7 @@ jobs:
           file bin/llama-cli
           # The board normally provides libvulkan.so.1; here use the bundled fallback.
           export LD_LIBRARY_PATH="$PWD/lib:$PWD/lib/vulkan-fallback"
-          # Executed directly: binfmt_misc hands the riscv64 ELF to qemu-riscv64-static.
+          # Executed directly: binfmt_misc hands the riscv64 ELF to qemu-riscv64.
           ./bin/llama-cli --version
           ./bin/llama-server --version
           # --help exit codes differ between tools; just check they ran and printed usage.
