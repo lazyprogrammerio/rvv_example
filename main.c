@@ -2,6 +2,7 @@
 #include <time.h>
 #include <stdio.h>
 #include <math.h>
+#include <stdlib.h>
 
 struct pt {
   float x;
