@@ -1,0 +1,89 @@
+name: build-and-test
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - README.md
+  pull_request:
+    paths-ignore:
+      - README.md
+  workflow_dispatch:
+
+jobs:
+  bananapi:
+    name: bananapi (RVV 1.0, vec.S)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross toolchain and QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-riscv64-linux-gnu qemu-user
+          riscv64-linux-gnu-gcc --version | head -1
+          qemu-riscv64 --version | head -1
+
+      - name: Build (make bananapi)
+        run: make bananapi
+
+      - name: Run benchmark under QEMU (make go)
+        run: make go QEMU="qemu-riscv64 -L /usr/riscv64-linux-gnu"
+
+      - name: Check vec_len_rvv against scalar reference
+        run: |
+          riscv64-linux-gnu-gcc -O -static ci/check.c vec.S -o check -march=rv64gcv_zba -lm
+          for vlen in 128 256; do
+            echo "vlen=$vlen"
+            qemu-riscv64 -cpu rv64,v=true,zba=true,vlen=$vlen,rvv_ta_all_1s=on,rvv_ma_all_1s=on ./check
+          done
+
+  licheepi:
+    name: licheepi (RVV 0.7.1 / XTheadVector, vec_0p7.S)
+    runs-on: ubuntu-24.04
+    env:
+      # Upstream QEMU does not emulate RVV 0.7.1; T-Head's fork provides the c910v CPU.
+      XUANTIE_QEMU_REPO: https://github.com/XUANTIE-RV/qemu
+      XUANTIE_QEMU_REF: 0258f62b9436e72a8d6710f924ff09b6e54d4abf
+      QEMU_C910: ${{ github.workspace }}/.qemu-c910/qemu-riscv64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross toolchain (GCC 14, binutils 2.42 with XTheadVector)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-14-riscv64-linux-gnu
+          riscv64-linux-gnu-gcc-14 --version | head -1
+          riscv64-linux-gnu-as --version | head -1
+
+      - name: Restore XuanTie QEMU
+        id: qemu-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.qemu-c910
+          key: xuantie-qemu-linux-user-${{ runner.os }}-${{ env.XUANTIE_QEMU_REF }}
+
+      - name: Build XuanTie QEMU (linux-user)
+        if: steps.qemu-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y ninja-build pkg-config libglib2.0-dev python3-venv flex bison
+          git init -q "$RUNNER_TEMP/xuantie-qemu"
+          cd "$RUNNER_TEMP/xuantie-qemu"
+          git fetch -q --depth 1 "$XUANTIE_QEMU_REPO" "$XUANTIE_QEMU_REF"
+          git checkout -q FETCH_HEAD
+          mkdir build && cd build
+          ../configure --target-list=riscv64-linux-user --disable-werror
+          ninja qemu-riscv64
+          mkdir -p "$(dirname "$QEMU_C910")"
+          cp qemu-riscv64 "$QEMU_C910"
+
+      - name: Build (make licheepi)
+        run: make licheepi CC_RV=riscv64-linux-gnu-gcc-14
+
+      - name: Run benchmark under QEMU (c910v)
+        run: '"$QEMU_C910" -cpu c910v -L /usr/riscv64-linux-gnu ./main'
+
+      - name: Check vec_len_rvv against scalar reference
+        run: |
+          riscv64-linux-gnu-gcc-14 -O -static ci/check.c vec_0p7.S -o check -march=rv64gc_xtheadvector -lm
+          "$QEMU_C910" -cpu c910v ./check
