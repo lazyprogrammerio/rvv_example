@@ -195,7 +195,7 @@ build_llamacpp() {
 ALLOWED_NEEDED='^(ld-linux-riscv64-lp64d\.so\.1|libc\.so\.6|libm\.so\.6|libpthread\.so\.0|libdl\.so\.2|librt\.so\.1|libstdc\+\+\.so\.6|libgcc_s\.so\.1|libgomp\.so\.1|libvulkan\.so\.1|lib(ggml|llama|mtmd)[-a-z0-9_]*\.so(\.[0-9]+)*)$'
 
 verify_elf() {
-  local f=$1 desc needed bad
+  local f=$1 desc needed bad syms
   desc=$(file -L "$f")
   echo "$desc"
   [[ $desc == *"ELF 64-bit LSB"*"UCB RISC-V"* ]] || die "$f is not a riscv64 ELF"
@@ -215,7 +215,8 @@ verify_elf() {
       || die "$f uses an unexpected program interpreter"
   fi
   # A static libstdc++ in the tool hijacks Mesa's shared one (see build_llamacpp).
-  ! riscv64-linux-gnu-nm -D --defined-only "$f" | grep -qE ' _ZNSt9basic_iosIcSt11char_traitsIcEE4init|_ZNSt6locale5_Impl' \
+  syms=$(riscv64-linux-gnu-nm -D --defined-only "$f")
+  ! grep -qE ' _ZNSt9basic_iosIcSt11char_traitsIcEE4init|_ZNSt6locale5_Impl' <<<"$syms" \
     || die "$f contains a static libstdc++; Mesa's Vulkan drivers would crash it"
   check_isa "$f"
   check_symver "$f" GLIBC "$GLIBC_MAX"
