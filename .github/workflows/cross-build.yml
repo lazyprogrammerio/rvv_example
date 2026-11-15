@@ -94,6 +94,28 @@ jobs:
           ./bin/llama-bench -m "$RUNNER_TEMP/model.gguf" -p 16 -n 16 -r 1 -t 2
           ./bin/llama-cli -m "$RUNNER_TEMP/model.gguf" -st -p "Once upon a time" -n 16 -t 2 < /dev/null
 
+      # Exercises the Vulkan path (loader -> Mesa ICD -> ggml-vulkan shaders) in
+      # a riscv64 Ubuntu 24.04 userland with Mesa's llvmpipe software driver.
+      # The RX 580/RADV itself still can't be tested in CI.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: riscv64
+
+      - name: Run llama-cli on Vulkan (llvmpipe) in a riscv64 Ubuntu 24.04 container
+        run: |
+          docker run --rm --platform linux/riscv64 \
+            -v "$PWD/$ARTIFACT:/pkg:ro" -v "$RUNNER_TEMP:/m:ro" ubuntu:24.04 bash -euo pipefail -c '
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+                mesa-vulkan-drivers vulkan-tools > /dev/null
+              cp -r /pkg /tmp/pkg && /tmp/pkg/install.sh
+              vulkaninfo --summary 2>/dev/null | grep -E "deviceName|driverName"
+              # llvmpipe is a CPU-type device, which ggml-vulkan skips unless asked.
+              export GGML_VK_VISIBLE_DEVICES=0 QEMU_CPU=sifive-u54
+              llama-cli -m /m/model.gguf -ngl 99 -st -p "Once upon a time" -n 16 -t 2 \
+                < /dev/null 2>&1 | tee /tmp/out.txt
+              grep -q "llvmpipe" /tmp/out.txt'
+
   release:
     name: publish release asset
     if: startsWith(github.ref, 'refs/tags/')

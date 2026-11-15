@@ -176,16 +176,18 @@ What the build does (`ci/build-llamacpp.sh`, toolchain in `ci/riscv64-linux-gnu.
   `GGML_STATIC=ON`, all code for `-march=rv64gc` (no RVV), and compiles the
   Vulkan shaders with the host's `glslc`.
 * Checks with `file` and `riscv64-linux-gnu-readelf -d` that every binary is
-  riscv64 and only needs `libc`, `libm` and `libvulkan.so.1`, with
-  `readelf -A` that its ISA stays within RV64GC, and with `readelf -V` that
-  it needs no glibc newer than 2.39 (Ubuntu 24.04).
+  riscv64 and only needs `libc`, `libm`, `libstdc++`, `libgcc_s` and
+  `libvulkan.so.1`, with `readelf -A` that its ISA stays within RV64GC, and
+  with `readelf -V` that it needs no glibc/libstdc++ newer than Ubuntu 24.04's.
 * Produces `dist/llamacpp-riscv64-unmatched.tar.gz` with `llama-cli`,
   `llama-server`, `llama-quantize`, `llama-bench`, a fallback `libvulkan.so.1`
   and `install.sh`.
 
 The binaries are not fully static. The Vulkan loader must be a shared library
 because it `dlopen()`s Mesa's RADV driver. ggml and llama are linked statically
-into each tool, along with libstdc++ and libgcc.
+into each tool. libstdc++ stays shared: Mesa loads the system `libstdc++.so.6`,
+and a second, static copy inside the tools clashes with it (`free(): invalid
+pointer` at startup).
 
 To rebuild locally on an x86-64 Ubuntu 24.04 host: `ci/build-llamacpp.sh`
 (override `LLAMACPP_REF`, `VULKAN_REF`, `WORK_DIR`, `DIST_DIR` as needed).

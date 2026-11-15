@@ -13,6 +13,7 @@
 #   DIST_DIR          output directory                (default ./dist)
 #   JOBS              parallel build jobs             (default nproc)
 #   GLIBC_MAX         newest glibc symbol version allowed (default 2.39, Ubuntu 24.04)
+#   GLIBCXX_MAX       newest libstdc++ symbol version allowed (default 3.4.33, Ubuntu 24.04)
 #   SKIP_APT=1        don't apt-get install host dependencies
 #   LLAMACPP_EXTRA_CMAKE_ARGS  extra (space-separated) llama.cpp CMake args
 set -euo pipefail
@@ -28,6 +29,7 @@ DIST_DIR=$(realpath -m "${DIST_DIR:-$REPO_ROOT/dist}")
 JOBS=${JOBS:-$(nproc)}
 SKIP_APT=${SKIP_APT:-0}
 GLIBC_MAX=${GLIBC_MAX:-2.39}
+GLIBCXX_MAX=${GLIBCXX_MAX:-3.4.33}
 
 export RISCV64_SYSROOT=${RISCV64_SYSROOT:-/usr/riscv64-linux-gnu}
 export RISCV64_STAGING_PREFIX="$WORK_DIR/staging"
@@ -77,13 +79,14 @@ check_isa() {
   ((${#bad[@]} == 0)) || die "$f uses ISA extensions the U74 lacks: ${bad[*]}"
 }
 
-# check_glibc <elf>: no glibc symbol versions newer than the board's glibc.
-check_glibc() {
-  local f=$1 newest
-  newest=$(riscv64-linux-gnu-readelf -V "$f" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
-  echo "  newest glibc symbol: ${newest:-none}"
-  [[ -z $newest || $(printf '%s\n' "$newest" "$GLIBC_MAX" | sort -V | tail -1) == "$GLIBC_MAX" ]] \
-    || die "$f needs GLIBC_$newest, newer than the board's $GLIBC_MAX"
+# check_symver <elf> <prefix> <max>: no <prefix>_x.y symbol versions newer
+# than the board's (GLIBC from libc, GLIBCXX from libstdc++).
+check_symver() {
+  local f=$1 pfx=$2 max=$3 newest
+  newest=$(riscv64-linux-gnu-readelf -V "$f" | { grep -o "${pfx}_[0-9][0-9.]*" || true; } | sed "s/${pfx}_//" | sort -uV | tail -1)
+  echo "  newest $pfx symbol: ${newest:-none}"
+  [[ -z $newest || $(printf '%s\n' "$newest" "$max" | sort -V | tail -1) == "$max" ]] \
+    || die "$f needs ${pfx}_$newest, newer than the board's $max"
 }
 
 # Fail fast if the cross toolchain's own static runtime (libstdc++, libgcc,
@@ -155,9 +158,12 @@ build_llamacpp() {
   # Fully static binaries are not possible with Vulkan: the loader is a
   # shared library that dlopen()s Mesa's RADV driver, which needs a dynamic
   # glibc. GGML_STATIC=ON + BUILD_SHARED_LIBS=OFF links ggml/llama statically
-  # into each tool; with static libstdc++/libgcc and ggml's own thread pool
-  # (no libgomp) the binaries only need libc, libm and libvulkan.so.1. No
-  # RPATH is embedded so the build tree's staging path cannot leak.
+  # into each tool, with ggml's own thread pool (no libgomp).
+  # libstdc++/libgcc stay shared: Mesa's drivers (via LLVM) load the system
+  # libstdc++.so.6, and a second static copy exported from the executable
+  # interposes on it and aborts with "free(): invalid pointer" as soon as the
+  # Vulkan loader opens a driver. No RPATH is embedded so the build tree's
+  # staging path cannot leak.
   # The Unmatched's FU740 U74 cores are plain RV64GC (no vector, half-float
   # or bitmanip extensions). The toolchain file sets -march=rv64gc for all
   # code; the GGML_RV* switches stop ggml-cpu from adding RVV & co.
@@ -174,7 +180,6 @@ build_llamacpp() {
     -DLLAMA_BUILD_TESTS=OFF \
     -DGGML_OPENMP=OFF \
     -DCMAKE_SKIP_RPATH=ON \
-    -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
     -DGGML_RVV=OFF -DGGML_RV_ZFH=OFF -DGGML_RV_ZVFH=OFF \
     -DGGML_RV_ZICBOP=OFF -DGGML_RV_ZIHINTPAUSE=OFF -DGGML_RV_ZBA=OFF \
     -DVulkan_INCLUDE_DIR="$RISCV64_STAGING_PREFIX/include" \
@@ -209,7 +214,8 @@ verify_elf() {
       || die "$f uses an unexpected program interpreter"
   fi
   check_isa "$f"
-  check_glibc "$f"
+  check_symver "$f" GLIBC "$GLIBC_MAX"
+  check_symver "$f" GLIBCXX "$GLIBCXX_MAX"
 }
 
 verify() {
@@ -246,7 +252,7 @@ package() {
   cat >"$PKG_DIR/BUILD-INFO" <<INFO
 llama.cpp      $LLAMACPP_REF ($(git -C "$SRC_DIR/llama.cpp" rev-parse --short HEAD))
 Vulkan-Loader  $VULKAN_REF
-target         riscv64 Linux glibc >= $GLIBC_MAX, -march=$RISCV64_MARCH (SiFive U74, HiFive Unmatched)
+target         riscv64 Linux glibc >= $GLIBC_MAX, libstdc++ >= GLIBCXX_$GLIBCXX_MAX, -march=$RISCV64_MARCH (SiFive U74, HiFive Unmatched)
 isa            $(riscv64-linux-gnu-readelf -A "$PKG_DIR/bin/llama-cli" | sed -n 's/.*Tag_RISCV_arch: "\(.*\)"/\1/p')
 backends       CPU + Vulkan
 compiler       $(riscv64-linux-gnu-gcc --version | head -1)
