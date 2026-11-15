@@ -180,6 +180,7 @@ build_llamacpp() {
     -DLLAMA_BUILD_TESTS=OFF \
     -DGGML_OPENMP=OFF \
     -DCMAKE_SKIP_RPATH=ON \
+    -DCMAKE_EXE_LINKER_FLAGS="" \
     -DGGML_RVV=OFF -DGGML_RV_ZFH=OFF -DGGML_RV_ZVFH=OFF \
     -DGGML_RV_ZICBOP=OFF -DGGML_RV_ZIHINTPAUSE=OFF -DGGML_RV_ZBA=OFF \
     -DVulkan_INCLUDE_DIR="$RISCV64_STAGING_PREFIX/include" \
@@ -213,6 +214,9 @@ verify_elf() {
     riscv64-linux-gnu-readelf -l "$f" | grep -q '/lib/ld-linux-riscv64-lp64d.so.1' \
       || die "$f uses an unexpected program interpreter"
   fi
+  # A static libstdc++ in the tool hijacks Mesa's shared one (see build_llamacpp).
+  ! riscv64-linux-gnu-nm -D --defined-only "$f" | grep -qE ' _ZNSt9basic_iosIcSt11char_traitsIcEE4init|_ZNSt6locale5_Impl' \
+    || die "$f contains a static libstdc++; Mesa's Vulkan drivers would crash it"
   check_isa "$f"
   check_symver "$f" GLIBC "$GLIBC_MAX"
   check_symver "$f" GLIBCXX "$GLIBCXX_MAX"
