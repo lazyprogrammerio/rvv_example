@@ -160,7 +160,7 @@ implementations. Neither has been measured here. To get real numbers, run
 ### llama.cpp on HiFive Unmatched + RX 580
 
 `.github/workflows/cross-build.yml` cross-builds [llama.cpp](https://github.com/ggml-org/llama.cpp)
-with the Vulkan backend for the SiFive HiFive Unmatched (riscv64, Ubuntu 26.04)
+with the Vulkan backend for the SiFive HiFive Unmatched (riscv64, Ubuntu 24.04)
 with an AMD RX 580 driven by `amdgpu` + Mesa RADV. Everything is built on an
 x86-64 runner; nothing is compiled on the board. This is separate from the
 RVV benchmark above (the U74 cores have no vector unit) and does not touch
@@ -173,10 +173,12 @@ What the build does (`ci/build-llamacpp.sh`, toolchain in `ci/riscv64-linux-gnu.
   llama.cpp's `Vulkan_INCLUDE_DIR`/`Vulkan_LIBRARY` at it so no host x86-64
   Vulkan libraries are used.
 * Builds llama.cpp (pinned tag) with `GGML_VULKAN=ON`, `GGML_NATIVE=OFF`,
-  `GGML_STATIC=ON`, CPU code for `-march=rv64gc` (no RVV), and compiles the
+  `GGML_STATIC=ON`, all code for `-march=rv64gc` (no RVV), and compiles the
   Vulkan shaders with the host's `glslc`.
 * Checks with `file` and `riscv64-linux-gnu-readelf -d` that every binary is
-  riscv64 and only needs `libc`, `libm` and `libvulkan.so.1`.
+  riscv64 and only needs `libc`, `libm` and `libvulkan.so.1`, with
+  `readelf -A` that its ISA stays within RV64GC, and with `readelf -V` that
+  it needs no glibc newer than 2.39 (Ubuntu 24.04).
 * Produces `dist/llamacpp-riscv64-unmatched.tar.gz` with `llama-cli`,
   `llama-server`, `llama-quantize`, `llama-bench`, a fallback `libvulkan.so.1`
   and `install.sh`.
@@ -185,8 +187,12 @@ The binaries are not fully static. The Vulkan loader must be a shared library
 because it `dlopen()`s Mesa's RADV driver. ggml and llama are linked statically
 into each tool, along with libstdc++ and libgcc.
 
-To rebuild locally on an x86-64 Ubuntu 24.04+ host: `ci/build-llamacpp.sh`
+To rebuild locally on an x86-64 Ubuntu 24.04 host: `ci/build-llamacpp.sh`
 (override `LLAMACPP_REF`, `VULKAN_REF`, `WORK_DIR`, `DIST_DIR` as needed).
+Use 24.04, not newer: from Ubuntu 25.10 the riscv64 cross toolchain and its
+static runtime libraries target the RVA23 profile (vector, Zba/Zbb, Zcb, ...),
+and the U74 cores die on those instructions with `SIGILL`. The script refuses
+to build with such a toolchain.
 
 #### Install on the board
 
@@ -225,8 +231,10 @@ Caveats:
 * **U74 CPU.** Four in-order 1.2 GHz cores with no vector extension. Tokenizing,
   sampling and any layers not offloaded run here, so CPU-only inference is
   very slow. Set `-t 4`.
-* CI cannot test the GPU. The smoke-test job only runs `llama-cli --version`
-  under `qemu-riscv64`, so GPU inference has to be checked on the board.
+* CI cannot test the GPU. The smoke-test job runs the tools under
+  `qemu-riscv64 -cpu sifive-u54` (the same RV64GC ISA as the U74, so stray
+  newer instructions fault as on the board), including a small CPU-only
+  `llama-bench` run. GPU inference has to be checked on the board.
 * The runner's `glslc` may not support some newer shader extensions
   (cooperative matrix, bfloat16, integer dot product). Those shader
   variants are skipped at build time. Polaris does not support the

@@ -25,7 +25,10 @@ env:
 jobs:
   build:
     name: cross-build (riscv64, Vulkan)
-    runs-on: ubuntu-latest
+    # Pinned to 24.04: Ubuntu 25.10+ riscv64 toolchains (and their static
+    # libstdc++/libgcc) target RVA23, which the Unmatched's U74 cannot run.
+    # 24.04's toolchain targets rv64gc and its glibc 2.39 matches the board.
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -39,15 +42,17 @@ jobs:
           path: dist/${{ env.ARTIFACT }}.tar.gz
           if-no-files-found: error
 
-  # Proves the riscv64 binaries load and execute under user-mode emulation.
-  # GPU inference cannot be tested here: there is no AMD GPU (or any Vulkan
-  # ICD) on the runner, so Vulkan finds no devices. RADV/RX 580 must be
+  # Proves the riscv64 binaries load and execute under user-mode emulation
+  # of a SiFive U54 (same RV64GC ISA as the Unmatched's U74), so any
+  # instruction the board lacks raises SIGILL here too. A tiny model is run
+  # on the CPU backend. GPU inference cannot be tested here: there is no AMD
+  # GPU (or any Vulkan ICD) on the runner, so Vulkan finds no devices. RADV/RX 580 must be
   # checked on the board (vulkaninfo --summary, then llama-cli -ngl 99).
   smoke-test:
     name: smoke test (qemu-riscv64)
     needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -56,16 +61,19 @@ jobs:
       - name: Install qemu-user-static, binfmt-support and riscv64 runtime libs
         run: |
           sudo apt-get update
-          # Ubuntu 26.04 made qemu-user-static a virtual package provided by qemu-user-binfmt.
+          # From Ubuntu 26.04 qemu-user-static is a virtual package provided by qemu-user-binfmt.
           qemu=qemu-user-static
           apt-cache policy "$qemu" | grep -q 'Candidate: [0-9]' || qemu=qemu-user-binfmt
           sudo apt-get install -y "$qemu" binfmt-support \
             libc6-riscv64-cross libstdc++6-riscv64-cross libgcc-s1-riscv64-cross
 
-      - name: llama-cli --version under qemu-riscv64
+      - name: Run the tools under qemu-riscv64 -cpu sifive-u54
         env:
           # Where qemu finds the riscv64 dynamic linker and libc.
           QEMU_LD_PREFIX: /usr/riscv64-linux-gnu
+          # RV64GC only, like the U74 (qemu's default CPU accepts everything).
+          QEMU_CPU: sifive-u54
+          MODEL_URL: https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories260K.gguf
         run: |
           tar -xzf "$ARTIFACT.tar.gz"
           cd "$ARTIFACT"
@@ -81,6 +89,10 @@ jobs:
             grep -qi usage "$RUNNER_TEMP/$tool.txt" || { cat "$RUNNER_TEMP/$tool.txt"; exit 1; }
             echo "$tool: OK"
           done
+          # CPU-only inference with a 1 MB model (Vulkan finds no device here).
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/model.gguf" "$MODEL_URL"
+          ./bin/llama-bench -m "$RUNNER_TEMP/model.gguf" -p 16 -n 16 -r 1 -t 2
+          ./bin/llama-cli -m "$RUNNER_TEMP/model.gguf" -st -p "Once upon a time" -n 16 -t 2 < /dev/null
 
   release:
     name: publish release asset

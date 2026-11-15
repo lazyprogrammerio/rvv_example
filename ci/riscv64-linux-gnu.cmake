@@ -7,8 +7,11 @@
 #                        populated by the Ubuntu cross packages)
 # RISCV64_STAGING_PREFIX optional extra root holding cross-built dependencies
 #                        (e.g. the Vulkan loader/headers from ci/build-llamacpp.sh)
+# RISCV64_MARCH          -march for all C/C++/ASM code (default: rv64gc, the
+#                        FU740/U74 ISA). Newer toolchains (Ubuntu 25.10+)
+#                        default to RVA23, which the Unmatched cannot run.
 #
-# Both can be passed as -D cache variables or environment variables.
+# All can be passed as -D cache variables or environment variables.
 
 set(CMAKE_SYSTEM_NAME Linux)
 set(CMAKE_SYSTEM_PROCESSOR riscv64)
@@ -27,9 +30,20 @@ endif()
 if(NOT DEFINED RISCV64_STAGING_PREFIX AND DEFINED ENV{RISCV64_STAGING_PREFIX})
   set(RISCV64_STAGING_PREFIX "$ENV{RISCV64_STAGING_PREFIX}")
 endif()
+if(NOT DEFINED RISCV64_MARCH)
+  if(DEFINED ENV{RISCV64_MARCH})
+    set(RISCV64_MARCH "$ENV{RISCV64_MARCH}")
+  else()
+    set(RISCV64_MARCH rv64gc)
+  endif()
+endif()
 
 # Forward to try_compile() projects, which re-read this file.
-list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES RISCV64_SYSROOT RISCV64_STAGING_PREFIX)
+list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES RISCV64_SYSROOT RISCV64_STAGING_PREFIX RISCV64_MARCH)
+
+set(CMAKE_C_FLAGS_INIT   "-march=${RISCV64_MARCH} -mabi=lp64d")
+set(CMAKE_CXX_FLAGS_INIT "-march=${RISCV64_MARCH} -mabi=lp64d")
+set(CMAKE_ASM_FLAGS_INIT "-march=${RISCV64_MARCH} -mabi=lp64d")
 
 set(CMAKE_FIND_ROOT_PATH "${RISCV64_SYSROOT}")
 if(RISCV64_STAGING_PREFIX)
