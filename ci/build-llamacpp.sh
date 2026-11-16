@@ -8,9 +8,12 @@
 #   VULKAN_REF        Vulkan-Headers/Vulkan-Loader tag (default below)
 #   SPIRV_HEADERS_REF SPIRV-Headers tag               (default below)
 #   RISCV64_SYSROOT   riscv64 sysroot                 (default /usr/riscv64-linux-gnu)
+#   RISCV64_MARCH     -march for all code             (default rv64gc, the U74 ISA)
 #   WORK_DIR          sources + build trees           (default ./build-riscv64)
 #   DIST_DIR          output directory                (default ./dist)
 #   JOBS              parallel build jobs             (default nproc)
+#   GLIBC_MAX         newest glibc symbol version allowed (default 2.39, Ubuntu 24.04)
+#   GLIBCXX_MAX       newest libstdc++ symbol version allowed (default 3.4.33, Ubuntu 24.04)
 #   SKIP_APT=1        don't apt-get install host dependencies
 #   LLAMACPP_EXTRA_CMAKE_ARGS  extra (space-separated) llama.cpp CMake args
 set -euo pipefail
@@ -25,9 +28,12 @@ WORK_DIR=$(realpath -m "${WORK_DIR:-$REPO_ROOT/build-riscv64}")
 DIST_DIR=$(realpath -m "${DIST_DIR:-$REPO_ROOT/dist}")
 JOBS=${JOBS:-$(nproc)}
 SKIP_APT=${SKIP_APT:-0}
+GLIBC_MAX=${GLIBC_MAX:-2.39}
+GLIBCXX_MAX=${GLIBCXX_MAX:-3.4.33}
 
 export RISCV64_SYSROOT=${RISCV64_SYSROOT:-/usr/riscv64-linux-gnu}
 export RISCV64_STAGING_PREFIX="$WORK_DIR/staging"
+export RISCV64_MARCH=${RISCV64_MARCH:-rv64gc}
 SRC_DIR="$WORK_DIR/src"
 
 PKG_NAME=llamacpp-riscv64-unmatched
@@ -50,6 +56,51 @@ install_host_deps() {
     gcc-riscv64-linux-gnu g++-riscv64-linux-gnu cmake ninja-build \
     glslang-tools libshaderc-dev glslc git python3 \
     build-essential pkg-config file ca-certificates
+}
+
+# ISA extensions the FU740's U74 cores implement (RV64GC). zca/zcd are the
+# C extension split out; zmmul/zaamo/zalrsc are subsets of M/A.
+ALLOWED_ISA_EXTS=' i m a f d c zicsr zifencei zmmul zaamo zalrsc zca zcd '
+
+# check_isa <elf>: the ELF's merged Tag_RISCV_arch must stay within RV64GC.
+# The linker merges the attribute of every input object, including the
+# toolchain's static libstdc++/libgcc/crt objects, so this also catches a
+# toolchain whose runtime libraries were built for a newer profile (RVA23).
+check_isa() {
+  local f=$1 arch ext exts bad=()
+  arch=$(riscv64-linux-gnu-readelf -A "$f" | sed -n 's/.*Tag_RISCV_arch: "\(.*\)"/\1/p')
+  [[ -n $arch ]] || die "$f has no Tag_RISCV_arch attribute; cannot verify its ISA"
+  echo "  ISA: $arch"
+  IFS=_ read -ra exts <<<"${arch#rv64}"
+  for ext in "${exts[@]}"; do
+    ext=$(sed -E 's/[0-9]+p[0-9]+$//' <<<"$ext")
+    [[ $ALLOWED_ISA_EXTS == *" $ext "* ]] || bad+=("$ext")
+  done
+  ((${#bad[@]} == 0)) || die "$f uses ISA extensions the U74 lacks: ${bad[*]}"
+}
+
+# check_symver <elf> <prefix> <max>: no <prefix>_x.y symbol versions newer
+# than the board's (GLIBC from libc, GLIBCXX from libstdc++).
+check_symver() {
+  local f=$1 pfx=$2 max=$3 newest
+  newest=$(riscv64-linux-gnu-readelf -V "$f" | { grep -o "${pfx}_[0-9][0-9.]*" || true; } | sed "s/${pfx}_//" | sort -uV | tail -1)
+  echo "  newest $pfx symbol: ${newest:-none}"
+  [[ -z $newest || $(printf '%s\n' "$newest" "$max" | sort -V | tail -1) == "$max" ]] \
+    || die "$f needs ${pfx}_$newest, newer than the board's $max"
+}
+
+# Fail fast if the cross toolchain's own static runtime (libstdc++, libgcc,
+# crt) uses extensions the U74 lacks, e.g. Ubuntu 25.10+'s RVA23 toolchain.
+preflight_toolchain() {
+  log "Checking that the cross toolchain can target $RISCV64_MARCH"
+  local probe="$WORK_DIR/isa-probe"
+  printf '#include <iostream>\n#include <string>\nint main(int c, char**) { std::string s(c, 42); std::cout << s << std::endl; }\n' \
+    | riscv64-linux-gnu-g++ -x c++ -O2 -march="$RISCV64_MARCH" -mabi=lp64d \
+        -static-libstdc++ -static-libgcc -o "$probe" - \
+    || die "riscv64-linux-gnu-g++ cannot build for -march=$RISCV64_MARCH"
+  riscv64-linux-gnu-g++ --version | head -1
+  ( check_isa "$probe" ) \
+    || die "the cross toolchain's runtime libraries are built for a newer RISC-V profile than the U74 supports; build on Ubuntu 24.04"
 }
 
 # fetch <url> <tag> <dir>: shallow clone of a pinned tag
@@ -107,12 +158,15 @@ build_llamacpp() {
   # Fully static binaries are not possible with Vulkan: the loader is a
   # shared library that dlopen()s Mesa's RADV driver, which needs a dynamic
   # glibc. GGML_STATIC=ON + BUILD_SHARED_LIBS=OFF links ggml/llama statically
-  # into each tool; with static libstdc++/libgcc and ggml's own thread pool
-  # (no libgomp) the binaries only need libc, libm and libvulkan.so.1. No
-  # RPATH is embedded so the build tree's staging path cannot leak.
+  # into each tool, with ggml's own thread pool (no libgomp).
+  # libstdc++/libgcc stay shared: Mesa's drivers (via LLVM) load the system
+  # libstdc++.so.6, and a second static copy exported from the executable
+  # interposes on it and aborts with "free(): invalid pointer" as soon as the
+  # Vulkan loader opens a driver. No RPATH is embedded so the build tree's
+  # staging path cannot leak.
   # The Unmatched's FU740 U74 cores are plain RV64GC (no vector, half-float
-  # or bitmanip extensions), so the CPU backend is built for -march=rv64gc
-  # (ggml defaults to RVV).
+  # or bitmanip extensions). The toolchain file sets -march=rv64gc for all
+  # code; the GGML_RV* switches stop ggml-cpu from adding RVV & co.
   # Vulkan_* point FindVulkan at the cross-built loader/headers explicitly, so
   # the host's x86-64 libvulkan/headers can never be picked up.
   cmake -S "$SRC_DIR/llama.cpp" -B "$WORK_DIR/build/llama.cpp" -G Ninja \
@@ -126,7 +180,7 @@ build_llamacpp() {
     -DLLAMA_BUILD_TESTS=OFF \
     -DGGML_OPENMP=OFF \
     -DCMAKE_SKIP_RPATH=ON \
-    -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
+    -DCMAKE_EXE_LINKER_FLAGS="" \
     -DGGML_RVV=OFF -DGGML_RV_ZFH=OFF -DGGML_RV_ZVFH=OFF \
     -DGGML_RV_ZICBOP=OFF -DGGML_RV_ZIHINTPAUSE=OFF -DGGML_RV_ZBA=OFF \
     -DVulkan_INCLUDE_DIR="$RISCV64_STAGING_PREFIX/include" \
@@ -141,7 +195,7 @@ build_llamacpp() {
 ALLOWED_NEEDED='^(ld-linux-riscv64-lp64d\.so\.1|libc\.so\.6|libm\.so\.6|libpthread\.so\.0|libdl\.so\.2|librt\.so\.1|libstdc\+\+\.so\.6|libgcc_s\.so\.1|libgomp\.so\.1|libvulkan\.so\.1|lib(ggml|llama|mtmd)[-a-z0-9_]*\.so(\.[0-9]+)*)$'
 
 verify_elf() {
-  local f=$1 desc needed bad
+  local f=$1 desc needed bad syms
   desc=$(file -L "$f")
   echo "$desc"
   [[ $desc == *"ELF 64-bit LSB"*"UCB RISC-V"* ]] || die "$f is not a riscv64 ELF"
@@ -160,6 +214,13 @@ verify_elf() {
     riscv64-linux-gnu-readelf -l "$f" | grep -q '/lib/ld-linux-riscv64-lp64d.so.1' \
       || die "$f uses an unexpected program interpreter"
   fi
+  # A static libstdc++ in the tool hijacks Mesa's shared one (see build_llamacpp).
+  syms=$(riscv64-linux-gnu-nm -D --defined-only "$f")
+  ! grep -qE ' _ZNSt9basic_iosIcSt11char_traitsIcEE4init|_ZNSt6locale5_Impl' <<<"$syms" \
+    || die "$f contains a static libstdc++; Mesa's Vulkan drivers would crash it"
+  check_isa "$f"
+  check_symver "$f" GLIBC "$GLIBC_MAX"
+  check_symver "$f" GLIBCXX "$GLIBCXX_MAX"
 }
 
 verify() {
@@ -196,7 +257,8 @@ package() {
   cat >"$PKG_DIR/BUILD-INFO" <<INFO
 llama.cpp      $LLAMACPP_REF ($(git -C "$SRC_DIR/llama.cpp" rev-parse --short HEAD))
 Vulkan-Loader  $VULKAN_REF
-target         riscv64 Linux glibc, -march=rv64gc (SiFive U74, HiFive Unmatched)
+target         riscv64 Linux glibc >= $GLIBC_MAX, libstdc++ >= GLIBCXX_$GLIBCXX_MAX, -march=$RISCV64_MARCH (SiFive U74, HiFive Unmatched)
+isa            $(riscv64-linux-gnu-readelf -A "$PKG_DIR/bin/llama-cli" | sed -n 's/.*Tag_RISCV_arch: "\(.*\)"/\1/p')
 backends       CPU + Vulkan
 compiler       $(riscv64-linux-gnu-gcc --version | head -1)
 glslc          $(glslc --version 2>&1 | head -1)
@@ -210,6 +272,7 @@ INFO
 main() {
   install_host_deps
   mkdir -p "$SRC_DIR" "$RISCV64_STAGING_PREFIX"
+  preflight_toolchain
   build_vulkan_deps
   build_llamacpp
   verify
