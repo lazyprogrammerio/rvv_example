@@ -5,11 +5,6 @@ name: cross-build-llamacpp
 # Nothing is built on the board; see ci/build-llamacpp.sh and README.md.
 
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
