@@ -1,6 +1,9 @@
 name: cloudv
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -9,6 +12,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build
+      - name: Install native build requirements
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Show runner and compiler
         run: |
           uname -a
+          gcc --version | head -1
+
+      - name: Build natively (make bananapi)
+        run: make bananapi CROSS=
+
+      - name: Run benchmark natively
+        run: ./main
+
+      - name: Check vec_len_rvv against scalar reference
+        run: |
+          gcc -O ci/check.c vec.S -o check -march=rv64gcv_zba -lm
+          ./check
